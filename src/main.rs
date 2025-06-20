@@ -18,7 +18,7 @@ use tokio::time::interval;
 const RANGE_BINS: usize = 500; // 50km range, 100m resolution
 const MAX_RANGE_KM: f32 = 50.0;
 const RANGE_RESOLUTION_M: f32 = 100.0;
-const DATA_RATE_HZ: u64 = 5; // 5Hz data rate
+const DATA_RATE_HZ: u64 = 1; // 1Hz data rate
 const OVERLAP_DEGREES: f32 = 20.0; // 20 degree overlap
 
 // Enhanced radar data structure
@@ -64,39 +64,38 @@ impl RadarSimulator {
     fn new() -> Self {
         let mut targets = Vec::new();
 
-        // Add some aircraft targets
+        // Only weather patterns - remove aircraft and ground clutter
         targets.push(RadarTarget {
             azimuth: 45.0,
             range: 15.0,
+            intensity: 0.6,
+            velocity: 0.5, // Slow moving weather system
+            target_type: TargetType::Weather,
+        });
+
+        targets.push(RadarTarget {
+            azimuth: 120.0,
+            range: 30.0,
             intensity: 0.8,
-            velocity: 2.0, // 2 degrees/second
-            target_type: TargetType::Aircraft,
+            velocity: 0.2,
+            target_type: TargetType::Weather,
         });
 
         targets.push(RadarTarget {
             azimuth: 200.0,
             range: 25.0,
-            intensity: 0.9,
-            velocity: -1.5,
-            target_type: TargetType::Aircraft,
-        });
-
-        // Add weather pattern
-        targets.push(RadarTarget {
-            azimuth: 120.0,
-            range: 30.0,
-            intensity: 0.6,
-            velocity: 0.1,
+            intensity: 0.7,
+            velocity: -0.3,
             target_type: TargetType::Weather,
         });
 
-        // Add ground clutter
+        // Add a larger weather system spanning multiple ranges
         targets.push(RadarTarget {
-            azimuth: 300.0,
-            range: 3.0,
-            intensity: 0.4,
-            velocity: 0.0,
-            target_type: TargetType::GroundClutter,
+            azimuth: 280.0,
+            range: 20.0,
+            intensity: 0.9,
+            velocity: 0.1,
+            target_type: TargetType::Weather,
         });
 
         Self {
@@ -104,7 +103,7 @@ impl RadarSimulator {
             sequence_counter: 0,
             targets,
             noise_generator: Fbm::<Perlin>::new(42),
-            weather_intensity: 0.3,
+            weather_intensity: 0.4, // Increase weather intensity
         }
     }
 
@@ -174,20 +173,11 @@ impl RadarSimulator {
                         let intensity_factor = (-distance * 0.5).exp();
 
                         match target.target_type {
-                            TargetType::Aircraft => {
-                                data[target_az][target_range] +=
-                                    target.intensity * intensity_factor;
-                            }
                             TargetType::Weather => {
                                 data[target_az][target_range] +=
                                     target.intensity * intensity_factor * self.weather_intensity;
                             }
-                            TargetType::GroundClutter => {
-                                if target.range < 5.0 {
-                                    data[target_az][target_range] +=
-                                        target.intensity * intensity_factor * 0.3;
-                                }
-                            }
+                            _ => {} // Only process weather targets
                         }
                     }
                 }

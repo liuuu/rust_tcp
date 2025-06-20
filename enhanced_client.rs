@@ -1,3 +1,5 @@
+use colorgrad::Gradient;
+use image::{ImageBuffer, Rgb, RgbImage};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::error::Error;
@@ -6,8 +8,6 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::spawn;
 use tokio::time::{sleep, Duration, Instant};
-use image::{ImageBuffer, Rgb, RgbImage};
-use colorgrad::Gradient;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct RadarSweep {
@@ -57,7 +57,7 @@ impl DoubleBuffer {
 
     fn swap_buffers(&mut self) -> VecDeque<RadarSweep> {
         self.current_front = !self.current_front;
-        
+
         if self.current_front {
             std::mem::take(&mut self.back_buffer)
         } else {
@@ -124,13 +124,14 @@ impl SlidingWindowProcessor {
                 if sweep1.sequence_id == sweep2.sequence_id {
                     // Check timestamp synchronization (within 10ms tolerance)
                     let time_diff = (sweep1.timestamp as i64 - sweep2.timestamp as i64).abs();
-                    if time_diff < 10_000 { // 10ms in microseconds
+                    if time_diff < 10_000 {
+                        // 10ms in microseconds
                         // Remove the synchronized sweeps from buffers
                         let s1 = self.client1_data.remove(i).unwrap();
-                        let s2 = if j >= i { 
-                            self.client2_data.remove(j - 1).unwrap() 
-                        } else { 
-                            self.client2_data.remove(j).unwrap() 
+                        let s2 = if j >= i {
+                            self.client2_data.remove(j - 1).unwrap()
+                        } else {
+                            self.client2_data.remove(j).unwrap()
                         };
                         return Some((s1, s2));
                     }
@@ -148,7 +149,8 @@ impl SlidingWindowProcessor {
         complete_data.extend_from_slice(client1_main);
 
         // Overlap region: 170-190° (average both clients)
-        let overlap_merged = self.merge_overlap_region(&client1.overlap_region, &client2.overlap_region);
+        let overlap_merged =
+            self.merge_overlap_region(&client1.overlap_region, &client2.overlap_region);
         complete_data.extend(overlap_merged);
 
         // Client 2: 190-360° (skip overlap portion)
@@ -177,7 +179,8 @@ impl SlidingWindowProcessor {
             match (row1, row2) {
                 (Some(r1), Some(r2)) => {
                     // Average the overlapping data
-                    let averaged: Vec<f32> = r1.iter()
+                    let averaged: Vec<f32> = r1
+                        .iter()
                         .zip(r2.iter())
                         .map(|(a, b)| (a + b) / 2.0)
                         .collect();
@@ -214,7 +217,7 @@ impl RadarImageProcessor {
     fn new() -> Self {
         // Create a radar-like color gradient (blue -> green -> yellow -> red)
         let gradient = colorgrad::turbo();
-        
+
         Self {
             gradient,
             value_range: (0.0, 1.0),
@@ -222,7 +225,11 @@ impl RadarImageProcessor {
         }
     }
 
-    fn process_and_save(&self, frame: &MergedRadarFrame, filename: &str) -> Result<(), Box<dyn Error>> {
+    fn process_and_save(
+        &self,
+        frame: &MergedRadarFrame,
+        filename: &str,
+    ) -> Result<(), Box<dyn Error>> {
         let width = frame.complete_data.len() as u32;
         let height = frame.complete_data.get(0).map_or(0, |row| row.len()) as u32;
 
@@ -272,7 +279,10 @@ impl RadarImageProcessor {
 
         // Save image
         img.save(filename)?;
-        println!("Saved radar image: {} (range: {:.6} - {:.6})", filename, min_val, max_val);
+        println!(
+            "Saved radar image: {} (range: {:.6} - {:.6})",
+            filename, min_val, max_val
+        );
 
         Ok(())
     }
@@ -302,21 +312,24 @@ impl RadarImageProcessor {
     }
 }
 
-async fn receive_radar_data(port: u16, buffer: Arc<Mutex<DoubleBuffer>>) -> Result<(), Box<dyn Error>> {
+async fn receive_radar_data(
+    port: u16,
+    buffer: Arc<Mutex<DoubleBuffer>>,
+) -> Result<(), Box<dyn Error>> {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
     println!("Connected to radar server on port {}", port);
 
     loop {
         // Read the size of the incoming data
         let data_size = stream.read_u64().await?;
-        
+
         // Read the serialized data
         let mut data_buffer = vec![0u8; data_size as usize];
         stream.read_exact(&mut data_buffer).await?;
-        
+
         // Deserialize the radar sweep
         let radar_sweep: RadarSweep = bincode::deserialize(&data_buffer)?;
-        
+
         println!(
             "[Port {}] Received sweep {} (Client {}): Az {:.1}°-{:.1}°, {} azimuth bins, {} range bins",
             port,
@@ -386,10 +399,10 @@ async fn process_radar_data(
                 merged_frame.range_bins.len()
             );
 
-            // Generate PNG every few frames to avoid overwhelming output
-            if merged_frame.sequence_id % 5 == 0 {
+            // Generate PNG every frame since server runs at 1Hz now
+            if merged_frame.sequence_id % 1 == 0 {
                 let filename = format!("radar_frame_{:06}.png", merged_frame.sequence_id);
-                
+
                 if let Err(e) = image_processor.process_and_save(&merged_frame, &filename) {
                     eprintln!("Failed to save image {}: {}", filename, e);
                 } else {
@@ -436,7 +449,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("🚀 All systems started!");
     println!("📊 Receiving radar data from ports 8080 and 8081");
     println!("🔄 Processing with sliding window algorithm");
-    println!("🖼️  Generating PNG images every 5 frames");
+    println!("🖼️  Generating PNG images every frame (1Hz rate)");
     println!("Press Ctrl+C to stop...");
 
     // Wait for all tasks
