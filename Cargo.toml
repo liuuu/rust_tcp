@@ -11,6 +11,14 @@ path = "src/main.rs"
 name = "enhanced_client"
 path = "enhanced_client.rs"
 
+[[bin]]
+name = "send_data_client"
+path = "send_data_client.rs"
+
+[[bin]]
+name = "stop_test_client"
+path = "stop_test_client.rs"
+
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -9,6 +9,7 @@ use tokio::net::TcpStream;
 use tokio::spawn;
 use tokio::time::{sleep, Duration, Instant};
 
+// Import from the server modules
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct RadarSweep {
     timestamp: u64,
@@ -122,22 +123,40 @@ impl SlidingWindowProcessor {
         for (i, sweep1) in self.client1_data.iter().enumerate() {
             for (j, sweep2) in self.client2_data.iter().enumerate() {
                 if sweep1.sequence_id == sweep2.sequence_id {
-                    // Check timestamp synchronization (within 10ms tolerance)
+                    // Check timestamp synchronization (within 100ms tolerance for late connections)
                     let time_diff = (sweep1.timestamp as i64 - sweep2.timestamp as i64).abs();
-                    if time_diff < 10_000 {
-                        // 10ms in microseconds
-                        // Remove the synchronized sweeps from buffers
-                        let s1 = self.client1_data.remove(i).unwrap();
-                        let s2 = if j >= i {
-                            self.client2_data.remove(j - 1).unwrap()
+                    if time_diff < 100_000 {
+                        // 100ms in microseconds
+                        // Remove the synchronized sweeps from buffers safely
+                        let (s1, s2) = if i > j {
+                            let s1 = self.client1_data.remove(i).unwrap();
+                            let s2 = self.client2_data.remove(j).unwrap();
+                            (s1, s2)
                         } else {
-                            self.client2_data.remove(j).unwrap()
+                            let s2 = self.client2_data.remove(j).unwrap();
+                            let s1 = self.client1_data.remove(i).unwrap();
+                            (s1, s2)
                         };
+
+                        println!(
+                            "🔗 Found synchronized pair: seq {} (time diff: {}μs)",
+                            s1.sequence_id, time_diff
+                        );
                         return Some((s1, s2));
                     }
                 }
             }
         }
+
+        // If no synchronization found and buffers are getting full, warn user
+        if self.client1_data.len() > 5 || self.client2_data.len() > 5 {
+            println!(
+                "⚠️  Large buffer sizes detected (C1: {}, C2: {}). Possible synchronization issue.",
+                self.client1_data.len(),
+                self.client2_data.len()
+            );
+        }
+
         None
     }
 
@@ -316,8 +335,31 @@ async fn receive_radar_data(
     port: u16,
     buffer: Arc<Mutex<DoubleBuffer>>,
 ) -> Result<(), Box<dyn Error>> {
+    use tokio::io::AsyncWriteExt;
+
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
     println!("Connected to radar server on port {}", port);
+
+    // Determine send delay based on port (0s for 8080, 10s for 8081)
+    let send_delay = if port == 8080 {
+        Duration::from_secs(0)
+    } else {
+        Duration::from_secs(5)
+    };
+
+    println!(
+        "Will send 'SEND_DATA' command in {}s on port {}",
+        send_delay.as_secs(),
+        port
+    );
+
+    // Wait for the specified delay
+    sleep(send_delay).await;
+
+    // Send SEND_DATA command
+    stream.write_all(b"SEND_DATA").await?;
+    stream.flush().await?;
+    println!("✅ Sent 'SEND_DATA' command to server on port {}", port);
 
     loop {
         // Read the size of the incoming data
@@ -403,7 +445,17 @@ async fn process_radar_data(
             if merged_frame.sequence_id % 1 == 0 {
                 let filename = format!("radar_frame_{:06}.png", merged_frame.sequence_id);
 
-                if let Err(e) = image_processor.process_and_save(&merged_frame, &filename) {
+                let current_dir = std::env::current_dir();
+                let save_path = current_dir
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join("radar_images")
+                    .join(&filename);
+                std::fs::create_dir_all(save_path.parent().unwrap())
+                    .unwrap_or_else(|_| panic!("Failed to create directory for images"));
+
+                if let Err(e) =
+                    image_processor.process_and_save(&merged_frame, &save_path.to_string_lossy())
+                {
                     eprintln!("Failed to save image {}: {}", filename, e);
                 } else {
                     let elapsed = last_process_time.elapsed();
@@ -419,6 +471,7 @@ async fn process_radar_data(
 async fn main() -> Result<(), Box<dyn Error>> {
     println!("🎯 Enhanced Radar Client with Double Buffering & Sliding Window Merging");
     println!("📡 Connecting to radar data streams...");
+    println!("⏰ Timing: Client 1 (8080) sends SEND_DATA at 0s, Client 2 (8081) at 10s");
 
     // Create double buffers for each client
     let client1_buffer = Arc::new(Mutex::new(DoubleBuffer::new(20)));
