@@ -6,7 +6,7 @@ use std::io;
 use tcp_server::RadarTcpServer;
 
 // Application-specific parameters
-const DATA_RATE_HZ: u64 = 1; // 1Hz data rate
+const DATA_RATE_HZ: f64 = 0.2; // 1Hz data rate
 
 #[tokio::main]
 async fn main() -> io::Result<()> {

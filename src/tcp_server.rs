@@ -14,19 +14,20 @@ use tokio::sync::Mutex;
 use tokio::time::interval;
 
 // Client connection manager
-pub type ClientConnections = Arc<Mutex<HashMap<usize, TcpStream>>>;
+use tokio::net::tcp::OwnedWriteHalf;
+pub type ClientConnections = Arc<Mutex<HashMap<usize, OwnedWriteHalf>>>;
 pub type ReadyClients = Arc<Mutex<HashMap<usize, bool>>>; // Track which clients are ready for data
 
 pub struct RadarTcpServer {
     pub ports: Vec<u16>,
-    pub data_rate_hz: u64,
+    pub data_rate_hz: f64,
     pub client_counter: Arc<AtomicUsize>,
     pub clients: ClientConnections,
     pub ready_clients: ReadyClients,
 }
 
 impl RadarTcpServer {
-    pub fn new(ports: Vec<u16>, data_rate_hz: u64) -> Self {
+    pub fn new(ports: Vec<u16>, data_rate_hz: f64) -> Self {
         Self {
             ports,
             data_rate_hz,
@@ -126,14 +127,23 @@ async fn start_server_on_port(
 
 async fn handle_client_connection(
     client_id: usize,
-    mut socket: TcpStream,
+    socket: TcpStream,
     clients: ClientConnections,
     ready_clients: ReadyClients,
 ) {
+    // Split the socket to handle commands and data streaming concurrently
+    let (mut reader, mut writer) = socket.into_split();
     let mut buffer = [0; 1024];
 
+    // Store the writer half immediately for data streaming
+    {
+        let mut clients_map = clients.lock().await;
+        clients_map.insert(client_id, writer);
+    }
+
+    // Continue reading commands from the reader half
     loop {
-        match socket.read(&mut buffer).await {
+        match reader.read(&mut buffer).await {
             Ok(0) => {
                 // Connection closed
                 println!("Client {} disconnected", client_id);
@@ -156,18 +166,14 @@ async fn handle_client_connection(
                 if message == "SEND_DATA" {
                     println!("Client {} requested data streaming", client_id);
 
-                    // Mark client as ready and store the socket
+                    // Mark client as ready for data streaming
                     {
                         let mut ready_map = ready_clients.lock().await;
                         ready_map.insert(client_id, true);
                     }
-                    {
-                        let mut clients_map = clients.lock().await;
-                        clients_map.insert(client_id, socket);
-                    }
 
                     println!("Client {} is now ready for data streaming", client_id);
-                    break; // Exit the command reading loop
+                    // Continue listening for more commands (don't break!)
                 } else if message == "STOP" {
                     println!("Client {} requested to stop data streaming", client_id);
 
@@ -179,10 +185,34 @@ async fn handle_client_connection(
 
                     println!("Client {} stopped receiving data streaming", client_id);
                     // Continue listening for more commands
+                } else {
+                    println!("Unknown command from client {}: '{}'", client_id, message);
+
+                    // Optionally, you could send an error response back to the client
+                    let error_response = format!("Unknown command: '{}'\n", message);
+                    let mut clients_map = clients.lock().await;
+                    if let Some(writer) = clients_map.get_mut(&client_id) {
+                        if let Err(e) = writer.write_all(error_response.as_bytes()).await {
+                            eprintln!(
+                                "Failed to send error response to client {}: {}",
+                                client_id, e
+                            );
+                        }
+                    }
                 }
             }
             Err(e) => {
                 eprintln!("Error reading from client {}: {}", client_id, e);
+
+                // Remove from both maps on error
+                {
+                    let mut clients_map = clients.lock().await;
+                    clients_map.remove(&client_id);
+                }
+                {
+                    let mut ready_map = ready_clients.lock().await;
+                    ready_map.remove(&client_id);
+                }
                 break;
             }
         }
@@ -192,10 +222,10 @@ async fn handle_client_connection(
 pub async fn radar_data_broadcaster(
     clients: ClientConnections,
     ready_clients: ReadyClients,
-    data_rate_hz: u64,
+    data_rate_hz: f64,
 ) {
     let mut radar_sim = RadarSimulator::new();
-    let mut interval = interval(Duration::from_millis(1000 / data_rate_hz));
+    let mut interval = interval(Duration::from_millis((1000.0 / data_rate_hz) as u64));
     let mut last_ready_count = 0;
 
     println!("Starting radar data broadcast at {}Hz", data_rate_hz);
@@ -238,7 +268,7 @@ pub async fn radar_data_broadcaster(
 
         // Update target positions
         radar_sim.update_targets(1.0 / data_rate_hz as f32);
-        radar_sim.current_time += (1000000 / data_rate_hz) as u64; // microseconds
+        radar_sim.current_time += (1000000f64 / data_rate_hz) as u64; // microseconds
 
         // Generate ONE complete radar sweep (this is what real radar produces)
         let complete_sweep = radar_sim.generate_complete_sweep();
@@ -264,9 +294,12 @@ pub async fn radar_data_broadcaster(
             let mut clients_map = clients.lock().await;
             if let Some(stream) = clients_map.get_mut(&client_id) {
                 // Extract client's portion from the SAME complete sweep
+
                 let client_data = extract_client_portion(&complete_sweep, *port_index);
 
-                match send_radar_data(stream, &client_data).await {
+                let port = if *port_index == 0 { 8080 } else { 8081 };
+
+                match send_radar_data(stream, &client_data, port).await {
                     Ok(_) => {
                         println!(
                             "[{}] Sent sweep {} to Client {} (Port {}) (Az: {:.1}°-{:.1}°, {} targets)",
@@ -301,11 +334,16 @@ pub async fn radar_data_broadcaster(
 }
 
 pub async fn send_radar_data(
-    stream: &mut TcpStream,
+    stream: &mut OwnedWriteHalf,
     radar_sweep: &RadarSweep,
+    port: u16,
 ) -> Result<(), Box<dyn Error>> {
     let encoded_data = bincode::serialize(radar_sweep)?;
 
+    // delay to send to port 8080
+    if port == 8080 {
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+    }
     // Send data size first, then the data
     stream.write_u64(encoded_data.len() as u64).await?;
     stream.write_all(&encoded_data).await?;
